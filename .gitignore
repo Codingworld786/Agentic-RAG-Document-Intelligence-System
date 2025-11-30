@@ -1,0 +1,8 @@
+.env
+.env.local
+*.env
+
+
+
+logs/
+data/temp_upload/

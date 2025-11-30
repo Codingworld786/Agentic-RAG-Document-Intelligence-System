@@ -1,6 +1,6 @@
-langchain
-langchain-core
-langchain-community
+langchain==0.1.9
+langchain-community==0.0.25
+langchain-core==0.1.28
 pypdf
 pymupdf
 sentence-transformers
@@ -8,6 +8,7 @@ faiss-cpu
 chromadb
 langchain-groq
 python-dotenv
-typesense
 langchain_openai
 langgraph
+
+

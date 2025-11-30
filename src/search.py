@@ -1,39 +1,78 @@
-import os
-from dotenv import load_dotenv
-from src.vectorstore import FaissVectorStore
-from langchain_groq import ChatGroq
+from src.vectorstore import FAISSVectorStore
+from src.embedding import EmbeddingPipeline
+from src.llm import get_llm
+from langchain_core.messages import HumanMessage
+from src.prompt import prompt_llm
+import numpy as np
 
-load_dotenv()
-
+#retrive pipeline
 class RAGSearch:
-    def __init__(self, persist_dir: str = "faiss_store", embedding_model: str = "all-MiniLM-L6-v2", llm_model: str = "gemma2-9b-it"):
-        self.vectorstore = FaissVectorStore(persist_dir, embedding_model)
-        # Load or build vectorstore
-        faiss_path = os.path.join(persist_dir, "faiss.index")
-        meta_path = os.path.join(persist_dir, "metadata.pkl")
-        if not (os.path.exists(faiss_path) and os.path.exists(meta_path)):
-            from data_loader import load_all_documents
-            docs = load_all_documents("data")
-            self.vectorstore.build_from_documents(docs)
-        else:
-            self.vectorstore.load()
-        groq_api_key = ""
-        self.llm = ChatGroq(groq_api_key=groq_api_key, model_name=llm_model)
-        print(f"[INFO] Groq LLM initialized: {llm_model}")
+    def __init__(self, llm_model: str = "gpt-4o"):
+        self.vectorstore = FAISSVectorStore()
+        self.embedding_pipeline = EmbeddingPipeline()
+        self.llm = get_llm(model=llm_model)
+        print(f"[RAG] LLM ready: {llm_model}")
 
-    def search_and_summarize(self, query: str, top_k: int = 5) -> str:
-        results = self.vectorstore.query(query, top_k=top_k)
-        texts = [r["metadata"].get("text", "") for r in results if r["metadata"]]
-        context = "\n\n".join(texts)
-        if not context:
-            return "No relevant documents found."
-        prompt = f"""Summarize the following context for the query: '{query}'\n\nContext:\n{context}\n\nSummary:"""
-        response = self.llm.invoke([prompt])
-        return response.content
+        # Auto-build if no index
+        if self.vectorstore.index is None:
+            print("[RAG] Building vector store from saved embeddings...")
+            self.vectorstore.build_from_embeddings()
 
-# Example usage
+    def get_context(self, question: str, top_k: int = 5) -> str:
+        query_emb = self.embedding_pipeline.model.encode(
+            [question], normalize_embeddings=True
+        ).astype("float32")
+        results = self.vectorstore.search(query_emb, top_k)
+        texts = [r["text"] for r in results]
+        return "\n\n".join(texts)
+
+
+
+
+    def _get_structured_context(self, question: str, top_k: int = 6):
+            """Used by agents.py for logging — returns rich results"""
+            query_emb = self.embedding_pipeline.model.encode(
+                [question], normalize_embeddings=True
+            ).astype("float32")
+            
+            return self.vectorstore.search(query_emb, top_k)  # Already returns list[dict]
+
+    def index_file(self, file_path: str):
+        """Index a new document and update the vector store"""
+        from src.data_loader import load_all_documents
+
+        # Load and chunk the document
+        docs = load_all_documents([file_path])
+        chunks = self.embedding_pipeline.splitter.split_documents(docs)
+
+        if not chunks:
+            raise ValueError("No chunks generated from document")
+        
+        # Generate embeddings
+        texts = [chunk.page_content for chunk in chunks]
+        embeddings = self.embedding_pipeline.model.encode(
+            texts, normalize_embeddings=True
+        ).astype("float32")
+        
+        # Add to vector store
+        self.vectorstore.add_embeddings(texts, embeddings, chunks)
+        
+        print(f"[RAG] Indexed {len(chunks)} chunks from {file_path}")
+
+    def query(self, question: str, top_k: int = 5) -> str:
+        context = self.get_context(question, top_k)
+        if not context.strip():
+            return "No relevant information found."
+
+            # using llm
+
+        prompt = prompt_llm.format(question=question, context=context)
+
+        response = ""
+        for chunk in self.llm.stream([HumanMessage(content=prompt)]):
+            response += chunk.content
+        return response.strip()
+
 if __name__ == "__main__":
-    rag_search = RAGSearch()
-    query = "What is attention mechanism?"
-    summary = rag_search.search_and_summarize(query, top_k=3)
-    print("Summary:", summary)
+    rag = RAGSearch(llm_model="gpt-4.1")   # or "gpt-4o"
+    print(rag.query("What is the main idea of 'Attention is All You Need'?", top_k=5))

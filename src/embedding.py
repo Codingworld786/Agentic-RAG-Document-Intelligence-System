@@ -1,39 +1,71 @@
-from typing import List, Any
+# src/embedding.py
+import os
+import pickle
+from pathlib import Path
+from typing import List
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from src.data_loader import load_all_documents
 
 class EmbeddingPipeline:
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", chunk_size: int = 1000, chunk_overlap: int = 200):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.model = SentenceTransformer(model_name)
-        print(f"[INFO] Loaded embedding model: {model_name}")
 
-    def chunk_documents(self, documents: List[Any]) -> List[Any]:
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
+    #chunking
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", chunk_size: int = 1000, chunk_overlap: int = 200):
+        self.model = SentenceTransformer(model_name)
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             length_function=len,
             separators=["\n\n", "\n", " ", ""]
         )
-        chunks = splitter.split_documents(documents)
-        print(f"[INFO] Split {len(documents)} documents into {len(chunks)} chunks.")
-        return chunks
+        self.embed_dir = Path("data/embeddings")
+        self.embed_dir.mkdir(exist_ok=True)
 
-    def embed_chunks(self, chunks: List[Any]) -> np.ndarray:
-        texts = [chunk.page_content for chunk in chunks]
-        print(f"[INFO] Generating embeddings for {len(texts)} chunks...")
-        embeddings = self.model.encode(texts, show_progress_bar=True)
-        print(f"[INFO] Embeddings shape: {embeddings.shape}")
-        return embeddings
+    #embeddings : for embedding we will use hugging face's sentence transformer model    
 
-# Example usage
+    def get_embed_path(self, file_path: str) -> Path:
+        # example: data/docs/paper.pdf → data/embeddings/paper.pdf.pkl
+        stem = Path(file_path).relative_to("data").with_suffix(".pkl")
+        return self.embed_dir / stem
+
+    def file_already_embedded(self, file_path: str) -> bool:
+        return self.get_embed_path(file_path).exists()
+
+    def save_embeddings(self, file_path: str, chunks: List, embeddings: np.ndarray):
+        pkl_path = self.get_embed_path(file_path)
+        pkl_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(pkl_path, "wb") as f:
+            pickle.dump({"chunks": chunks, "embeddings": embeddings}, f)
+        print(f"[Saved] {file_path} → {pkl_path}")
+
+    def run_on_new_files(self, data_folder: str = "data"):
+        all_files = [str(p) for p in Path(data_folder).rglob("*") if p.is_file() and not str(p).startswith("data/embeddings")]
+        new_files = 0
+
+        for file_path in all_files:
+            if self.file_already_embedded(file_path):
+                print(f"[Skip] Already embedded: {file_path}")
+                continue
+
+            print(f"[Processing] {file_path}")
+            docs = load_all_documents([file_path])  # load only this one file
+            chunks = self.splitter.split_documents(docs)
+            if not chunks:
+                continue
+
+            embeddings = self.model.encode(
+                [c.page_content for c in chunks],
+                show_progress_bar=False,
+                normalize_embeddings=True
+            ).astype('float32')
+
+            self.save_embeddings(file_path, chunks, embeddings)
+            new_files += 1
+
+        print(f"\n[Done] Processed {new_files} new files. All embeddings are up to date!")
+
+# Run this every time – it’s safe and fast
 if __name__ == "__main__":
-    
-    docs = load_all_documents("data")
-    emb_pipe = EmbeddingPipeline()
-    chunks = emb_pipe.chunk_documents(docs)
-    embeddings = emb_pipe.embed_chunks(chunks)
-    print("[INFO] Example embedding:", embeddings[0] if len(embeddings) > 0 else None)
+    pipeline = EmbeddingPipeline()
+    pipeline.run_on_new_files()
